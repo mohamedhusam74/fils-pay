@@ -118,3 +118,16 @@ into the image.
   4. Pass the secret via an untracked env file or secret store, wired explicitly with `env_file:`.
   5. Optionally purge it from history (`git filter-repo`); rotation is what actually closes the
      exposure.
+
+## Fixes
+
+Fixed from CONFIRMED leads in `audit/leads.md`. Tests run against an isolated database
+(`filspay_fixer_test`), never the shared `filspay` one.
+
+| ID | Severity | Ticket | file:line | What's wrong | Why (root cause) | What breaks (example in fils) | Fix | Test |
+|---|---|---|---|---|---|---|---|---|
+| L1 | Critical | "login without OTP" | `apps/api/src/auth/sessions.ts:92` | `lookupSession` accepted a pending (pre-OTP, `authenticated = false`) session. Both merchant auth gates use it: `requireSession` and `requireMerchantAuth`. | 0012 requires every authenticating query to include `authenticated = true`. `lookupSession` reads the `live_sessions` view (0058), which filters only revoked/expired, and the query added no `authenticated` predicate. The admin equivalent has it. | A password alone is a full session. `POST /v1/auth/login` sets `fp_sid` before OTP, and that cookie works for 10 min on every merchant route. That includes `POST /v1/merchants/:id/api-keys` (owner), so a phished owner password becomes a permanent API key. Illustrative: the attacker can then read every batch payout, e.g. 1,250,000 fils (1,250.000 BD). | Added `AND s.authenticated = true` to `lookupSession`'s query. | New `apps/api/src/auth/pendingSession.test.ts`: `lookupSession` returns null for a pending session; a pending cookie gets 401 on `/v1/auth/me` and `/v1/settlement/batches` while a verified one gets 200. Fails before (200), passes after. api suite: 352/364 pass. The 12 failures (refund `chk_refunds_reason_not_null`, webhook backoff) are pre-existing and identical with the fix reverted. |
+
+Follow-ups noticed while fixing, not yet fixed:
+- **L1:** `otpDevExpose` defaults to true unless `NODE_ENV=production` (`apps/api/src/config.ts`), and
+  compose never sets `NODE_ENV`, so the login response includes `devOtpCode`.
