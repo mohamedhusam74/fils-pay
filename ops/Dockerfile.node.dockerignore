@@ -1,0 +1,12 @@
+# Ignore rules for Dockerfile.node only (BuildKit picks up
+# <Dockerfile>.dockerignore). The build context is the whole repo root.
+.git
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+.claude
+audit
+ops
+apps/settlement

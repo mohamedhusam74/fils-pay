@@ -1,0 +1,5 @@
+# Ignore rules for Dockerfile.go only (BuildKit picks up
+# <Dockerfile>.dockerignore). The build context is the whole repo root, but
+# the Go build needs nothing outside apps/settlement.
+*
+!apps/settlement
