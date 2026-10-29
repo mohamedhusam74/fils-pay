@@ -9,7 +9,6 @@ import {
   promoteSession,
   revokeSession,
 } from "../auth/sessions.js";
-import { findOtpRecipient } from "../auth/users.js";
 import { withTransaction } from "../db/withTransaction.js";
 import { BadRequestError, GoneError, TooManyRequestsError, UnauthorizedError } from "../lib/errors.js";
 
@@ -75,17 +74,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       throw new UnauthorizedError("invalid_credentials");
     }
 
-    const recipient = await findOtpRecipient(app.db, email) ?? user;
-
     const { code, expiresAt, rawToken } = await withTransaction(app.db, async (client) => {
       const challenge = await issueChallenge(client, {
-        merchantUserId: recipient.id,
+        merchantUserId: user.id,
         ttlMinutes: app.config.otpTtlMinutes,
         codeLength: app.config.otpCodeLength,
         maxAttempts: app.config.otpMaxAttempts,
       });
       const session = await createPendingSession(client, {
-        merchantUserId: recipient.id,
+        merchantUserId: user.id,
         otpChallengeId: challenge.id,
         ttlMinutes: app.config.pendingSessionTtlMinutes,
         ipAddress: request.ip,
@@ -94,7 +91,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return { code: challenge.code, expiresAt: challenge.expiresAt, rawToken: session.rawToken };
     });
 
-    sendOtpCode(request.log, app.config, { merchantUserId: recipient.id, email: recipient.email }, code);
+    sendOtpCode(request.log, app.config, { merchantUserId: user.id, email: user.email }, code);
 
     reply.setCookie(app.config.cookieName, rawToken, {
       httpOnly: true,
