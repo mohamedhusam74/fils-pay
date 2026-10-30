@@ -1,0 +1,23 @@
+{
+  "base_ref": "dfc14fd",
+  "case_id": "L4",
+  "changed_files": [
+    "apps/api/src/admin/adjustmentAmountFils.test.ts",
+    "apps/api/src/admin/adjustmentCsvParsing.ts",
+    "apps/api/src/admin/adjustmentImport.test.ts",
+    "apps/api/src/lib/decimal.ts",
+    "apps/api/src/routes/adminAdjustmentImport.test.ts"
+  ],
+  "checks": [],
+  "evidence_level": "source",
+  "expected_base_commit": "dfc14fd2b3d83b4f4b009eb5eba7a022fbf39bf5",
+  "expected_patch_sha256": "1dd2052fb4e694beebd784126465d4e45b9479ee895c0b2bea3c85b6ba8ab731",
+  "finding": {
+    "id": "L4",
+    "summary": "parseAdjustmentAmountFils in apps/api/src/admin/adjustmentCsvParsing.ts converted admin adjustment CSV BD amounts with parseDecimalMinor at its 2-decimal default (truncating extra digits) instead of 1 BD = 1000 fils with up to 3 decimals (ADR-0001), so adjustments posted to ledger_entries and merchant_balances.cached_payable_fils were 10x too small or truncated (e.g. '4.75' -> 475 not 4750, '4.755' -> 475 not 4755, '0.005' -> 0 and the row skipped)."
+  },
+  "patch_file": "../../../../../../tmp/claude-1000/-mnt-c-Users-User-fils-pay/c6089c5e-9634-4d34-ae4a-0cd2a60e9c27/scratchpad/L4.patch",
+  "repository": "..",
+  "schema_version": "1.0",
+  "submodules": []
+}

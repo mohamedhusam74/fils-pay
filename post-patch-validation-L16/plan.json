@@ -1,0 +1,21 @@
+{
+  "base_ref": "dfc14fd",
+  "case_id": "L16",
+  "changed_files": [
+    "apps/api/src/paymentLinks/pay.ts",
+    "apps/api/src/paymentLinks/payReservation.test.ts",
+    "db/migrations/0073_payment_links_reservation_owner.sql"
+  ],
+  "checks": [],
+  "evidence_level": "source",
+  "expected_base_commit": "dfc14fd2b3d83b4f4b009eb5eba7a022fbf39bf5",
+  "expected_patch_sha256": "638b41b531207751c8d083d7f7539eaae3cc01adcf3271d1968dfab46a424ae2",
+  "finding": {
+    "id": "L16",
+    "summary": "payPaymentLink in apps/api/src/paymentLinks/pay.ts re-claimed reservations older than PAYMENT_LINK_RESERVATION_TIMEOUT_SECONDS (60s) and did not bind finalize or releaseReservation to the claimant (a 0-row finalize still returned 200 'paid'), so a buyer whose authorize+capture outlasted the timeout lost the reservation to a second buyer and both captured, double-charging a single-use payment link (e.g. two captures of 128,450 fils, incident 2026-05-14)."
+  },
+  "patch_file": "../../../../../../tmp/claude-1000/-mnt-c-Users-User-fils-pay/c6089c5e-9634-4d34-ae4a-0cd2a60e9c27/scratchpad/L16.patch",
+  "repository": "..",
+  "schema_version": "1.0",
+  "submodules": []
+}
