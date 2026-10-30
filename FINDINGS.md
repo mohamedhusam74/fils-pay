@@ -220,3 +220,35 @@ only, at most 3 decimals (ADR-0001).
   each row with `parseBhdToFils`, then post the difference (correct − posted) as a correcting
   adjustment with finance sign-off. The September duplicate import was already reversed by hand,
   at the old 1/10 amounts.
+
+### Group: security / concurrency
+
+#### L16: a single-use payment link can be captured twice
+
+- **Symptom:** two buyers are charged for one link. Root cause of incident 2026-05-14 (9 extra
+  captures, BD 1,284.500), which the postmortem blamed on callbacks. For a 128,450-fil link
+  where buyer 1's acquirer call takes over 60 s, buyer 2 re-claims and pays. Buyer 1 then still
+  captures and is told 200 "paid": 256,900 fils captured on one link, and both captures settle.
+- **How reproduced:** new test `apps/api/src/paymentLinks/payReservation.test.ts`. It stalls the
+  simulator's first authorize (or capture), ages `reserved_at` past the timeout, and races a
+  second buyer. Before the fix both buyers got 200 and the link was captured twice.
+- **Root cause:** `apps/api/src/paymentLinks/pay.ts`. The reservation had no owner. A `reserved`
+  link older than 60 s was re-claimable even while its holder was mid-capture. Finalize and
+  release matched any `reserved` row, and a 0-row finalize still answered 200.
+- **Fix:** migration `0073` adds `payment_links.reservation_id` and `capture_started_at`.
+  - The claim mints a `reservation_id`. A stale reservation is re-claimable only if its capture
+    hasn't started.
+  - After authorize, a pin step sets `capture_started_at` only if this request still owns the
+    reservation. Otherwise it returns 409 `payment_link_reservation_lost` without capturing.
+  - Finalize and release are bound to `reservation_id`.
+- **How verified:** both race tests fail before (200/200) and pass after: exactly one capture of
+  128,450 fils in each case. Existing payment-link tests pass (21/21). api suite: 360/372, the
+  same 12 pre-existing failures. Post-patch-validation launched; results will be appended.
+- **Effect on existing data:** migration 0073 adds two nullable columns, and existing links are
+  unaffected. Links paid twice before the fix (incident 2026-05-14 and any since) are not
+  corrected: each extra capture is a normal `captured` event that settled to the merchant, so it
+  needs a refund (owned by the refunds work).
+- **Trade-offs:**
+  - A buyer who loses the reservation after authorizing isn't voided, because `voidTransaction`
+    only accepts merchant actors. The hold lapses via hold expiry.
+  - A crash mid-capture leaves the link `reserved` for manual review instead of re-selling it.
