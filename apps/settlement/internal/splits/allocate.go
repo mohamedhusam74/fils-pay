@@ -95,7 +95,9 @@ func PayoutSplitBatch(ctx context.Context, db *pgxpool.Pool, batchID uuid.UUID) 
 			rows.Close()
 			return SplitPayoutResult{}, err
 		}
-		share := money.ApplyRateFils(money.Fils(netPayout), weightBps)
+		// A batch whose refunds exceeded its captures closes negative and
+		// pays nothing; its deficit carries into the parent's next batch.
+		share := money.ApplyRateFils(money.Fils(max(netPayout, 0)), weightBps)
 		shares = append(shares, ChildShare{ChildMerchantID: childID, WeightBps: weightBps, AllocatedFils: share})
 	}
 	if err := rows.Err(); err != nil {

@@ -30,9 +30,15 @@ type BatchResult struct {
 	AlreadyClosed bool // true when this call found an existing 'closed'/'paid' batch and made no changes (idempotent no-op)
 	GrossFils     money.Fils
 	FeeFils       money.Fils
-	NetPayoutFils money.Fils
-	EventCount    int
-	LineCount     int
+	// RefundFils and RefundFeeReversedFils are the refunds this batch netted
+	// off; CarriedInFils (<= 0) is earlier negative batches' deficit.
+	RefundFils            money.Fils
+	RefundFeeReversedFils money.Fils
+	CarriedInFils         money.Fils
+	NetPayoutFils         money.Fils
+	EventCount            int
+	LineCount             int
+	RefundCount           int
 }
 
 // PayoutResult is PayoutBatch's return value.
@@ -216,7 +222,17 @@ func CloseBatch(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID, bus
 		batchGross += grossForTxn
 		batchFee += feeForTxn
 	}
-	netPayout := NetPayableFils(batchGross, batchFee)
+
+	// Step 9: net off refunds and carry in earlier deficits (FP-212).
+	refunds, err := claimUnbatchedRefunds(ctx, tx, merchantID, end)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	carriedIn, carriedFrom, err := claimUncarriedDeficits(ctx, tx, merchantID, batchID)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	netPayout := NetPayableFils(batchGross, batchFee) - refunds.amountFils + refunds.feeReversedFils + carriedIn
 
 	// Record this batch's contribution to the platform-wide lifetime
 	// processed-volume counter, in the same transaction that freezes this
@@ -229,11 +245,26 @@ func CloseBatch(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID, bus
 	// Step 10: freeze the batch totals.
 	_, err = tx.Exec(ctx, `
 		UPDATE settlement_batches
-		   SET status = 'closed', gross_fils = $2, fee_fils = $3, net_payout_fils = $4, closed_at = now()
+		   SET status = 'closed', gross_fils = $2, fee_fils = $3, net_payout_fils = $4,
+		       refund_fils = $5, refund_fee_reversed_fils = $6, carried_in_fils = $7, closed_at = now()
 		 WHERE id = $1
-	`, batchID, int64(batchGross), int64(batchFee), int64(netPayout))
+	`, batchID, int64(batchGross), int64(batchFee), int64(netPayout),
+		int64(refunds.amountFils), int64(refunds.feeReversedFils), int64(carriedIn))
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("settlement: CloseBatch: freeze batch totals: %w", err)
+	}
+
+	if len(refunds.ids) > 0 {
+		_, err = tx.Exec(ctx, `UPDATE refunds SET settlement_batch_id = $2 WHERE id = ANY($1)`, refunds.ids, batchID)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf("settlement: CloseBatch: mark refunds batched: %w", err)
+		}
+	}
+	if len(carriedFrom) > 0 {
+		_, err = tx.Exec(ctx, `UPDATE settlement_batches SET carried_to_batch_id = $2 WHERE id = ANY($1)`, carriedFrom, batchID)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf("settlement: CloseBatch: mark deficits carried: %w", err)
+		}
 	}
 
 	// Step 11: mark every included event as batched — permanently
@@ -272,8 +303,10 @@ func CloseBatch(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID, bus
 		return BatchResult{}, fmt.Errorf("settlement: CloseBatch: enqueue outbox event: %w", err)
 	}
 
-	// Step 14: incrementally update the merchant_balances cache.
-	if err := balances.ApplyBatchClose(ctx, tx, merchantID, batchID, netPayout); err != nil {
+	// Step 14: incrementally update the merchant_balances cache with this
+	// batch's own activity. The carried-in deficit is already in the cache
+	// from the batch that produced it (its payout removed nothing).
+	if err := balances.ApplyBatchClose(ctx, tx, merchantID, batchID, netPayout-carriedIn); err != nil {
 		return BatchResult{}, fmt.Errorf("settlement: CloseBatch: apply balance cache delta: %w", err)
 	}
 
@@ -282,16 +315,102 @@ func CloseBatch(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID, bus
 	}
 
 	return BatchResult{
-		BatchID:       batchID,
-		MerchantID:    merchantID,
-		BatchDate:     batchDateOnly,
-		AlreadyClosed: false,
-		GrossFils:     batchGross,
-		FeeFils:       batchFee,
-		NetPayoutFils: netPayout,
-		EventCount:    len(eventIDs),
-		LineCount:     len(lines),
+		BatchID:               batchID,
+		MerchantID:            merchantID,
+		BatchDate:             batchDateOnly,
+		AlreadyClosed:         false,
+		GrossFils:             batchGross,
+		FeeFils:               batchFee,
+		RefundFils:            refunds.amountFils,
+		RefundFeeReversedFils: refunds.feeReversedFils,
+		CarriedInFils:         carriedIn,
+		NetPayoutFils:         netPayout,
+		EventCount:            len(eventIDs),
+		LineCount:             len(lines),
+		RefundCount:           len(refunds.ids),
 	}, nil
+}
+
+type claimedRefunds struct {
+	ids             []uuid.UUID
+	amountFils      money.Fils
+	feeReversedFils money.Fils
+}
+
+// claimUnbatchedRefunds locks every succeeded refund of this merchant that no
+// batch has claimed yet, up to the end of this business day. There is no
+// lower bound: a refund whose own day closed while it was still in flight
+// (its occurred_at is its transaction's start, before the commit) is netted
+// by the next batch instead of being stranded. refunds.settlement_batch_id
+// is set once and never cleared, like transaction_events' (0023), so a
+// refund reduces exactly one payout.
+func claimUnbatchedRefunds(ctx context.Context, tx pgx.Tx, merchantID uuid.UUID, end time.Time) (claimedRefunds, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, amount_fils, fee_reversed_fils
+		  FROM refunds
+		 WHERE merchant_id = $1
+		   AND status = 'succeeded'
+		   AND settlement_batch_id IS NULL
+		   AND occurred_at < $2
+		 ORDER BY occurred_at, id
+		 FOR UPDATE
+	`, merchantID, end)
+	if err != nil {
+		return claimedRefunds{}, fmt.Errorf("settlement: CloseBatch: select unbatched refunds: %w", err)
+	}
+	defer rows.Close()
+	var out claimedRefunds
+	for rows.Next() {
+		var id uuid.UUID
+		var amount, feeReversed int64
+		if err := rows.Scan(&id, &amount, &feeReversed); err != nil {
+			return claimedRefunds{}, fmt.Errorf("settlement: CloseBatch: scan refund: %w", err)
+		}
+		out.ids = append(out.ids, id)
+		out.amountFils += money.Fils(amount)
+		out.feeReversedFils += money.Fils(feeReversed)
+	}
+	if err := rows.Err(); err != nil {
+		return claimedRefunds{}, fmt.Errorf("settlement: CloseBatch: iterate refunds: %w", err)
+	}
+	return out, nil
+}
+
+// claimUncarriedDeficits locks this merchant's closed/paid batches that closed
+// negative (refunds exceeded that day's net) and have not yet been carried
+// into a later batch, returning their summed deficit (<= 0) and ids. The
+// caller stamps them with carried_to_batch_id in the same transaction.
+func claimUncarriedDeficits(ctx context.Context, tx pgx.Tx, merchantID, batchID uuid.UUID) (money.Fils, []uuid.UUID, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, net_payout_fils
+		  FROM settlement_batches
+		 WHERE merchant_id = $1
+		   AND id <> $2
+		   AND status IN ('closed', 'paid')
+		   AND net_payout_fils < 0
+		   AND carried_to_batch_id IS NULL
+		 ORDER BY batch_date, id
+		 FOR UPDATE
+	`, merchantID, batchID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("settlement: CloseBatch: select deficits: %w", err)
+	}
+	defer rows.Close()
+	var total money.Fils
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		var net int64
+		if err := rows.Scan(&id, &net); err != nil {
+			return 0, nil, fmt.Errorf("settlement: CloseBatch: scan deficit: %w", err)
+		}
+		total += money.Fils(net)
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, fmt.Errorf("settlement: CloseBatch: iterate deficits: %w", err)
+	}
+	return total, ids, nil
 }
 
 // PayoutBatch posts the ledger legs representing an actual payout for an
@@ -360,7 +479,13 @@ func PayoutBatch(ctx context.Context, db *pgxpool.Pool, batchID uuid.UUID) (Payo
 		return PayoutResult{}, fmt.Errorf("settlement: PayoutBatch: update batch status: %w", err)
 	}
 
-	if err := balances.ApplyPayout(ctx, tx, merchantID, batchID, money.Fils(netPayout)); err != nil {
+	// Only a positive net leaves the platform; a negative batch's deficit
+	// stays in the cache until a later batch carries it in.
+	paidFils := money.Fils(0)
+	if netPayout > 0 {
+		paidFils = money.Fils(netPayout)
+	}
+	if err := balances.ApplyPayout(ctx, tx, merchantID, batchID, paidFils); err != nil {
 		return PayoutResult{}, fmt.Errorf("settlement: PayoutBatch: apply balance cache delta: %w", err)
 	}
 
