@@ -44,6 +44,17 @@ export function nextStatusAfterRefund(input: PostRefundStatusInput): PostRefundS
   // am: so capture 4000 on a 10000 auth, refund all 4000, and it still says
   // partially_captured and can be refunded again?? feels wrong
   // YA: no, refundValidation stops the second refund since refunded == captured
+  //
+  // FP-212 (Oct 2026): kept on purpose. The refund ceiling is
+  // captured_fils - refunded_fils (processRefund), plus a DB CHECK
+  // refunded_fils <= captured_fils (0073), so a partially_captured row with
+  // everything refunded has nothing left to refund until more is captured.
+  // Alternative considered and not taken: mark it `refunded` once every
+  // captured fils has gone back (Huda's rule as quoted above). That would
+  // block further captures on the remaining authorization and would change
+  // the admin status recompute. capture.ts derives its post-capture status
+  // through this function too, so a capture after a refund keeps
+  // refunded_fils reflected in the status.
   if (compareFils(input.capturedFils, input.amountFils) < 0) {
     return "partially_captured";
   }
