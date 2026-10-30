@@ -171,3 +171,21 @@ on existing data. Fixes are grouped by shared root cause.
   deterministic for ties; before, ties were in arbitrary order.
 - **Not done (follow-up):** no server-side date-range cap or per-process export concurrency
   limit. With streaming, neither is needed for memory, but a cap would still bound DB time.
+
+#### L28-restart: no restart policy, so an OOM-killed API stays down
+
+- **Symptom:** after a crash or OOM kill (e.g. L28's export), the API container stays exited
+  until someone runs compose by hand. The same is true for settlement, reporting and Postgres.
+- **How reproduced:** new test `scripts/composeRestartPolicy.test.ts` reads
+  `ops/docker-compose.yml`. Before the fix no long-running service had `restart:`.
+- **Root cause:** `ops/docker-compose.yml` set no `restart:` policy on any service (noted in the
+  L28 environment analysis in `audit/leads.md`).
+- **Fix:** `restart: unless-stopped` on `postgres`, `api`, `settlement` and `reporting`. The
+  one-off `migrate` and `seed` jobs deliberately have none, so they don't re-run in a loop.
+- **How verified:** the test fails before and passes after. `docker compose config` resolves
+  `unless-stopped` on exactly those four services.
+- **Effect on existing data:** none. Running containers pick the policy up the next time they
+  are created (`docker compose up -d`), or live via `docker update --restart unless-stopped`. I
+  did not touch the shared running stack.
+- **Not done (follow-up):** no container memory limit (`mem_limit`) or Node heap cap
+  (`--max-old-space-size`) is set, so the 512 MB sizing in ARCHITECTURE isn't enforced locally.

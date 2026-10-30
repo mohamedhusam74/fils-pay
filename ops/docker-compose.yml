@@ -17,6 +17,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: filspay
       POSTGRES_PASSWORD: filspay_dev_password
@@ -76,6 +77,8 @@ services:
     # WEBHOOK_SECRET_ENCRYPTION_KEY must be set: the built-in dev fallback in
     # apps/api/src/config.ts decodes to 34 bytes and fails its own 32-byte check.
     command: ["npx", "tsx", "apps/api/src/index.ts"]
+    # Come back after a crash or OOM kill (512 MB API); one-off jobs don't restart.
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
@@ -100,6 +103,7 @@ services:
     # `daemon` exits at boot without SETTLEMENT_INTERNAL_TOKEN (no default);
     # the api sends the same token when calling this service.
     command: ["./settlement", "daemon"]
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
       SETTLEMENT_INTERNAL_TOKEN: ${SETTLEMENT_INTERNAL_TOKEN:?set in ops/.env (openssl rand -hex 32)}
@@ -118,6 +122,7 @@ services:
       dockerfile: ops/Dockerfile.node
     # No subcommand = `worker`. (MK)
     command: ["npx", "tsx", "apps/reporting/src/index.ts"]
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
     depends_on:
