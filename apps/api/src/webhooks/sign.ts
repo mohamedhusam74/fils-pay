@@ -38,6 +38,42 @@ export function signPayload(
   return { timestamp, signature: `t=${timestamp},v1=${signature}` };
 }
 
+/**
+ * The exact bytes a delivery sends as its HTTP body: the same canonical
+ * serialization `signPayload` signs. Sending anything else (e.g.
+ * JSON.stringify of a jsonb-read object, whose key order is Postgres's, not
+ * sorted) makes the signature unverifiable against the raw body, which is
+ * what receivers check.
+ */
+export function serializeWebhookBody(payload: unknown): string {
+  return canonicalJson(payload);
+}
+
+/**
+ * Receiver-side check over the raw HTTP body bytes, without re-parsing:
+ * the contract merchants implement. Equivalent to `verifySignature` on the
+ * parsed body because the body is sent in canonical form.
+ */
+export function verifyRawBodySignature(
+  rawBody: string,
+  header: string,
+  secret: string,
+  options?: { toleranceSeconds?: number; now?: number },
+): VerifySignatureResult {
+  const parsed = parseSignatureHeader(header);
+  if (!parsed) return { valid: false, reason: "malformed_header" };
+  const expected = createHmac("sha256", secret).update(`${parsed.timestamp}.${rawBody}`).digest("hex");
+  if (!timingSafeEqualHex(expected, parsed.signature)) {
+    return { valid: false, reason: "signature_mismatch" };
+  }
+  const now = options?.now ?? Math.floor(Date.now() / 1000);
+  const tolerance = options?.toleranceSeconds ?? 300;
+  if (Math.abs(now - parsed.timestamp) > tolerance) {
+    return { valid: false, reason: "timestamp_out_of_tolerance" };
+  }
+  return { valid: true };
+}
+
 interface ParsedSignatureHeader {
   timestamp: number;
   signature: string;

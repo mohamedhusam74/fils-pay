@@ -3,7 +3,7 @@ import { Client, type Pool } from "pg";
 import type { Config } from "../config.js";
 import { withTransaction } from "../db/withTransaction.js";
 import { decodeEncryptionKey, decryptSecret } from "./secretCrypto.js";
-import { signPayload } from "./sign.js";
+import { serializeWebhookBody, signPayload } from "./sign.js";
 import { buildEnvelope } from "./envelope.js";
 import { recordPayoutDisbursementEffect } from "./payoutDisbursement.js";
 import { WEBHOOK_DELIVERY_ID_HEADER, WEBHOOK_SIGNATURE_HEADER } from "./headers.js";
@@ -22,12 +22,13 @@ import type { WebhookTransport } from "./transport.js";
 
 const STEP_A_BATCH_LIMIT = 500;
 const STEP_B_BATCH_LIMIT = 100;
-// add refund.succeeded here when refunds ship, thats all it needs — am
-// YA: adding a type here without a buildEnvelope case throws in Step A and stalls the whole queue. envelope.ts first.
+// Every type here must have a buildEnvelope case (envelope.ts): an unknown
+// type throws in Step A and stalls the whole queue.
 // MK: settlement.batch_closed taken out of this list in Feb (too noisy). docs still mention it
 const WEBHOOK_ELIGIBLE_EVENT_TYPES: readonly string[] = [
   "transaction.captured",
   "transaction.voided",
+  "refund.succeeded",
   "settlement.paid",
 ];
 const NOTIFY_CHANNEL = "outbox_events_channel";
@@ -155,6 +156,9 @@ async function attemptOneDelivery(
 ): Promise<void> {
   const key = decodeEncryptionKey(config.webhookSecretEncryptionKey);
   const secret = decryptSecret(row.secret_ciphertext, key);
+  // Sign and send the same bytes: the body is the canonical serialization
+  // signPayload signs, so a receiver can verify the raw body.
+  const body = serializeWebhookBody(row.payload);
   const { signature } = signPayload(row.payload, secret);
 
   if (row.attempt_count === 0) {
@@ -169,7 +173,7 @@ async function attemptOneDelivery(
       [WEBHOOK_DELIVERY_ID_HEADER]: row.delivery_event_id,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(row.payload),
+    body,
     timeoutMs: config.webhookRequestTimeoutMs,
   });
 
