@@ -137,3 +137,37 @@ Follow-ups noticed while fixing, not yet fixed:
   impersonating admin can still save a filter.
 - **L3:** `lookupImpersonationGrant` doesn't check `admin_users.status`, so a disabled admin keeps
   a (now read-only) grant until it expires; no trigger revokes it.
+
+## Fixes, detailed format
+
+From here on each fix records: symptom, how reproduced, root cause, fix, how verified, and effect
+on existing data. Fixes are grouped by shared root cause.
+
+### Group: capacity / overload (512 MB API)
+
+#### L28: CSV export loads a merchant's whole history into memory
+
+- **Symptom:** `GET /v1/transactions/export` with no `from`/`to` (allowed: both are optional)
+  reads every transaction for the merchant in one query. It then builds the CSV in memory three
+  times over: the rows, the mapped lines, and the joined string. FP-209 measured about 1.1 KB
+  per row, so about 400k rows exhausts the 512 MB container. The OOM kill takes the API down for
+  every merchant, and concurrent exports get there sooner.
+- **How reproduced:** new test `apps/api/src/transactions/exportStreaming.test.ts`. It inserts
+  1,005 transactions sharing one timestamp, spies on `pool.query`, and calls the route. Before
+  the fix a single query returned all 1,005 rows (the test asserts ≤ 1,000).
+- **Root cause:** the route used `buildTransactionsExportCsv` (`apps/api/src/transactions/exportCsv.ts`,
+  unbounded `SELECT *`, no LIMIT). The 3-month cap exists only in the dashboard date picker. The
+  paged variant `streamTransactionsExportCsv` was unused, and its `occurred_at > cursor` keyset
+  would also have dropped rows sharing a timestamp at a page boundary.
+- **Fix:** `transactionsExportCsvChunks` is an async generator that reads 1,000 rows per query on
+  an `(occurred_at, id)` keyset. The cursor timestamp round-trips as text, because a JS `Date`
+  drops microseconds. The route streams it with `Readable.from`, so memory per export is about
+  one page regardless of range. `buildTransactionsExportCsv` now concatenates the same chunks,
+  with byte-identical output, and the buggy unused stream function is gone.
+- **How verified:** the new test fails before (1,005 rows in one query) and passes after: every
+  row is exported once and no query exceeds 1,000 rows. The existing `exportCsv.test.ts` passes
+  unchanged. See the api suite run in the commit message.
+- **Effect on existing data:** none. Read-only path. Row order is now `occurred_at, id`, which is
+  deterministic for ties; before, ties were in arbitrary order.
+- **Not done (follow-up):** no server-side date-range cap or per-process export concurrency
+  limit. With streaming, neither is needed for memory, but a cap would still bound DB time.
