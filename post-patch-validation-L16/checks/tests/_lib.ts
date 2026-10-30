@@ -79,3 +79,71 @@ export function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// ------------------------------------------------------------ project test runner
+
+export interface TapTest {
+  name: string;
+  ok: boolean;
+  /** Raw YAML diagnostic lines of a failing test. */
+  diagnostics: string[];
+}
+
+export interface ProjectTestRun {
+  code: number | null;
+  signal: string | null;
+  tests: TapTest[];
+  summary: Record<string, number>;
+}
+
+/**
+ * Runs the project's own node:test runner through tsx, exactly as
+ * apps/api's `npm test` does (`tsx --test --test-concurrency=1 <files>`),
+ * with the TAP reporter, from `cwd`. The child's output is mirrored to stderr.
+ */
+export async function runProjectTests(cwd: string, files: string[]): Promise<ProjectTestRun> {
+  const { spawn } = await import("node:child_process");
+  const tsxCli = process.env.L16_TSX_CLI;
+  if (!tsxCli) throw new Error("L16_TSX_CLI is not set; run through ppv.mjs");
+  const args = [tsxCli, "--no-cache", "--test", "--test-concurrency=1", "--test-reporter=tap", ...files];
+  diag(`running: node ${args.join(" ")} (cwd ${cwd})`);
+  const env = { ...process.env };
+  delete env.L16_OUT_FD;
+  const child = spawn(process.execPath, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+  const chunks: Buffer[] = [];
+  child.stdout.on("data", (c: Buffer) => {
+    chunks.push(c);
+    fs.writeSync(2, c);
+  });
+  child.stderr.on("data", (c: Buffer) => fs.writeSync(2, c));
+  const [code, signal] = await new Promise<[number | null, string | null]>((resolve) =>
+    child.on("close", (c, s) => resolve([c, s])),
+  );
+  return { code, signal, ...parseTap(Buffer.concat(chunks).toString("utf8")) };
+}
+
+/** Minimal TAP parser for node:test output; depth-0 file wrappers are skipped. */
+export function parseTap(tap: string): { tests: TapTest[]; summary: Record<string, number> } {
+  const lines = tap.split(/\r?\n/);
+  const tests: TapTest[] = [];
+  const summary: Record<string, number> = {};
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] as string;
+    const sum = /^# (tests|suites|pass|fail|cancelled|skipped|todo) (\d+)$/.exec(line);
+    if (sum) summary[sum[1] as string] = Number(sum[2]);
+    const m = /^(\s*)(not ok|ok) \d+ - (.*?)(\s+#\s+(SKIP|TODO).*)?$/.exec(line);
+    if (!m) continue;
+    const name = m[3] as string;
+    if ((m[1] as string).length === 0 && /\.test\.ts$/.test(name)) continue;
+    const diagnostics: string[] = [];
+    if (m[2] === "not ok") {
+      for (let j = i + 1; j < lines.length && j < i + 40; j++) {
+        const next = lines[j] as string;
+        diagnostics.push(next);
+        if (next.trim() === "...") break;
+      }
+    }
+    tests.push({ name, ok: m[2] === "ok", diagnostics });
+  }
+  return { tests, summary };
+}

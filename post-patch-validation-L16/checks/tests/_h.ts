@@ -545,3 +545,105 @@ export function summarize(responses: PayResponse[]): string {
 export function logDiag(label: string, value: unknown): void {
   diag(`${label}: ${JSON.stringify(value)}`);
 }
+
+// ------------------------------------------------------------ shared scenarios and small helpers
+
+/** Polls `cond` (bounded) and throws a harness error if it never holds. */
+export async function waitFor(cond: () => boolean | Promise<boolean>, label: string, tries = 1000, stepMs = 5): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    if (await cond()) return;
+    await delay(stepMs);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+export async function getPublic(app: FastifyInstance, token: string): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const res = await app.inject({ method: "GET", url: `/v1/payment-links/${token}` });
+  return { statusCode: res.statusCode, body: res.json() as Record<string, unknown> };
+}
+
+/** POST /v1/transactions/:id/capture as the merchant (API key), i.e. the dashboard/API capture path. */
+export async function apiCapture(app: FastifyInstance, rawKey: string, transactionId: string): Promise<PayResponse> {
+  const res = await app.inject({
+    method: "POST",
+    url: `/v1/transactions/${transactionId}/capture`,
+    headers: { authorization: `Bearer ${rawKey}`, "idempotency-key": randomUUID() },
+    payload: {},
+  });
+  let body: Record<string, unknown> = {};
+  try {
+    body = res.json() as Record<string, unknown>;
+  } catch {
+    body = { raw: res.body };
+  }
+  return { label: `merchant-capture`, statusCode: res.statusCode, body };
+}
+
+export interface RaceOutcome {
+  link: LinkFixture;
+  ledger: CaptureLedger;
+  responses: PayResponse[];
+  rejections: string[];
+}
+
+/**
+ * The incident interleaving, driven through payPaymentLink directly:
+ * buyer1 stalls at `step`, its reservation is backdated past the timeout,
+ * buyer2 (own key, own card) runs to completion, then buyer1 resumes.
+ */
+export async function raceTwoBuyers(
+  h: Harness,
+  step: "authorize" | "capture",
+  opts: { withApiKey?: boolean } = {},
+): Promise<RaceOutcome> {
+  const link = await createLink(h, { withApiKey: opts.withApiKey });
+  const ledger = new CaptureLedger();
+  const b1 = makeBuyer(h.sim, ledger, { stallAt: step });
+  const b2 = makeBuyer(h.sim, ledger, {});
+  const p1 = settle(pay(h, b1.acquirer, link.token, CARDS.approved));
+  await b1.waitParked(`buyer1 at ${step}`);
+  await age(h, link.linkId, 61);
+  const r2 = await settle(pay(h, b2.acquirer, link.token, CARDS.approved2));
+  b1.release();
+  const r1 = await p1;
+  const responses: PayResponse[] = [];
+  const rejections: string[] = [];
+  for (const [label, r] of [["buyer1", r1], ["buyer2", r2]] as const) {
+    if (r.ok) responses.push(asResponse(label, r.value));
+    else rejections.push(`${label}: ${errorMessage(r.error)}`);
+  }
+  return { link, ledger, responses, rejections };
+}
+
+/** A KYC-approved merchant with an owner API key (no link). */
+export async function createApiMerchant(h: Harness): Promise<{ merchantId: string; rawKey: string }> {
+  const fixture = await createLink(h, { withApiKey: true });
+  await h.pool.query(`DELETE FROM payment_links WHERE id = $1`, [fixture.linkId]);
+  return { merchantId: fixture.merchantId, rawKey: fixture.rawKey! };
+}
+
+/** POST /v1/merchants/:id/payment-links through the real route. */
+export async function routeCreateLink(
+  app: FastifyInstance,
+  m: { merchantId: string; rawKey: string },
+  body: { amountFils: number; reference: string; description?: string },
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const res = await app.inject({
+    method: "POST",
+    url: `/v1/merchants/${m.merchantId}/payment-links`,
+    headers: { authorization: `Bearer ${m.rawKey}` },
+    payload: { ...body, expiresAt: new Date(Date.now() + 3_600_000).toISOString() },
+  });
+  return { statusCode: res.statusCode, body: res.json() as Record<string, unknown> };
+}
+
+/** Response body with volatile identifiers replaced by presence markers, for byte-stable output. */
+export function stableBody(body: Record<string, unknown>): Record<string, unknown> {
+  const outBody: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (["transactionId", "paidAt", "acquirerReference", "id", "token", "url", "expiresAt", "createdAt", "canceledAt"].includes(k)) {
+      outBody[k] = v === null ? null : `<${typeof v}>`;
+    } else outBody[k] = v;
+  }
+  return outBody;
+}

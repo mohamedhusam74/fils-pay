@@ -8,8 +8,643 @@
     "apps/api/src/lib/decimal.ts",
     "apps/api/src/routes/adminAdjustmentImport.test.ts"
   ],
-  "checks": [],
-  "evidence_level": "source",
+  "checks": [
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "b01_amount_classification.ts"
+      ],
+      "compare_stream": "stdout",
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentAmountFils catch -> BadRequestError('invalid_amount')",
+        "base parseDecimalMinor regex vs packages/money/src/fils.ts BHD_STRING_PATTERN on the reject side",
+        "String.prototype.trim handling shared by both parsers"
+      ],
+      "id": "L4-B01",
+      "kind": "behavior",
+      "rationale": "parseAdjustmentAmountFils must keep its reject/accept classification outside the intended change. 29 malformed inputs ('', '+4.75', '.5', '5.', '1e3', '4.75abc', '0x10', 'Infinity', Arabic-Indic and fullwidth digits, U+2212 minus, '1,000.50', a 401-digit number, '90071992547409.92') must be rejected with the identical BadRequestError/400/invalid_amount and the identical message 'could not parse amount \"<raw>\"'. 234+20 inputs with at most two decimals, signs, leading zeros and trim-able padding (space, tab, NBSP, BOM) must be accepted with the same sign class. Values are not printed because they change x10 by design; E01/V05 assert them. Stdout must be byte-identical.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "b02_csv_splitting.ts"
+      ],
+      "compare_stream": "stdout",
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentCsv (line split, header check, cell split, reason omission)",
+        "BadRequestError codes empty_import, invalid_csv_header, invalid_csv_row"
+      ],
+      "id": "L4-B02",
+      "kind": "behavior",
+      "rationale": "parseAdjustmentCsv is unchanged by the patch but lives in the rewritten module. For 18 fixed CSV inputs (LF, CRLF, blank lines, BOM header, uppercase header, extra header column, 2- and 4-column rows, empty reason, padded cells, header-only, whitespace-only, bad header, missing amount/merchant, the unquoted thousands-separator rows '1,234.50' and '1,000.500,x', and a quoted amount) the parsed rows or the thrown error (constructor, status, code, message) must be byte-identical. The thousands-separator split (amount '1') is pre-existing and is pinned as unchanged, not fixed.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "b03_import_shape_db.ts",
+        "--db"
+      ],
+      "compare_stream": "stdout",
+      "covers": [
+        "apps/api/src/routes/adminAdjustmentImport.ts POST / and GET /:id/rows",
+        "apps/api/src/admin/adjustmentImport.ts applyAdjustmentImport, getAdjustmentImportRows, audit metadata",
+        "apps/api/src/admin/ledgerAdjustments.ts zero-amount early return",
+        "apps/api/src/db/withTransaction.ts ROLLBACK on AppError",
+        "apps/api/src/plugins/errorHandler.ts AppError body"
+      ],
+      "id": "L4-B03",
+      "kind": "behavior",
+      "rationale": "Persistence and HTTP contracts outside the amount scale must be identical, printed as canonical JSON with ids replaced by placeholders. (a) Zero family '0','0.00','-0','-0.000' through the real route: 201, four rows with parsedAmountFils 0 and null ledger group, no ledger legs, cache '0', audit total 0, and no '-0' leaking although base returns -0 from the parser. (b) Amounts rejected on both revisions ('abc','4.75abc','+1.00','.5','1e3','Infinity') after a valid first row: exact status and raw body, and zero rows in every sink. (c) Non-amount columns: response key set, rowCount, rowNumber, verbatim rawAmountText (including a service-level ' 4.75 '), reason and ledger-group presence.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "c01_harness_pure.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts loaded from the revision under test",
+        "packages/money/src/fils.ts parseBhdToFils byte-identical on both sides",
+        "post-patch-validation/checks/ppv.mjs (tree copy, per-tree node_modules, throwaway postgres:16-alpine)"
+      ],
+      "id": "L4-C01",
+      "kind": "control",
+      "rationale": "Benign pure harness control. Module resolution of @filspay/money, adjustmentCsvParsing.ts and lib/errors.ts must stay inside this revision's copied tree; packages/money, db/migrations, adjustmentImport.ts and the route must equal the base commit (HEAD of the checkout), so only adjustmentCsvParsing.ts and the deleted lib/decimal.ts differ between sides; and inputs the patch must not change behave the same: parse('0') is +0, parse('abc') is a 400 invalid_amount, and a two-row CSV splits identically. If this fails, no base/patch difference can be attributed to the fix.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "c02_harness_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "db/migrate.ts and db/migrations (identical on both sides)",
+        "apps/api/src/routes/adminAdjustmentImport.ts POST / and GET /:id/rows",
+        "apps/api/src/adminAuth login + OTP flow",
+        "post-patch-validation/checks/ppv.mjs (tree copy, per-tree node_modules, throwaway postgres:16-alpine)"
+      ],
+      "id": "L4-C02",
+      "kind": "control",
+      "rationale": "Benign DB/HTTP harness control. A throwaway Postgres migrated by the project's own db/migrate.ts holds the five import tables; the real buildApp boots; a finance admin completes password + OTP login; a zero-amount upload returns 201 and is recorded with no ledger group; a non-UUID merchant id returns 400 invalid_csv_row and writes nothing; an unauthenticated upload is 401. These outcomes must be identical on both revisions, proving the DB checks reach the changed path.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "c03_project_unchanged_tests.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.test.ts",
+        "packages/money/src/*.test.ts"
+      ],
+      "id": "L4-C03",
+      "kind": "control",
+      "rationale": "Project-runner control. In each revision's tree, the project's own runner (tsx --test --test-concurrency=1) must pass apps/api/src/admin/adjustmentCsvParsing.test.ts (unchanged by the patch) and the frozen packages/money suite (including parseBhdToFils >3-decimal rejection). Proves tsx, node:test and module resolution work per tree on both sides.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "e01_scale_pure.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentAmountFils",
+        "base-only apps/api/src/lib/decimal.ts parseDecimalMinor(raw, decimals=2)",
+        "packages/money/src/fils.ts parseBhdToFils",
+        "docs/adr ADR-0001"
+      ],
+      "id": "L4-E01",
+      "kind": "exploit",
+      "rationale": "The original finding as a pure assertion on this revision's real parseAdjustmentAmountFils. ADR-0001 (1 BD = 1000 fils, up to three decimals, never truncated) requires '4.75'->4750, '4.750'->4750, '4.755'->4755, '0.005'->5, '120.00'->120000, '-3.50'->-3500. Base returns 475/475/475/0/12000/-350 (parseDecimalMinor 2-decimal default, truncating), so the check must fail on base and pass on the patch. Expected values come from ADR-0001, not from CLAUDE.md's contradicting 'cents' note or the patch's own tests.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "e02_ledger_sinks_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/routes/adminAdjustmentImport.ts POST /v1/admin/adjustment-imports",
+        "apps/api/src/admin/adjustmentImport.ts applyAdjustmentImport and postAdjustmentToLedgerAndCache",
+        "apps/api/src/admin/ledgerAdjustments.ts postLedgerAdjustment zero-skip and positive branch",
+        "apps/api/src/admin/adjustmentImport.ts getAdjustmentImportRows",
+        "apps/settlement/internal/ledger/rebuild.go ledger-walk formula"
+      ],
+      "id": "L4-E02",
+      "kind": "exploit",
+      "rationale": "The harm in the money sinks, through the real route. A finance admin uploads rows '4.755' and '0.005' for a fresh merchant. ADR-0001 requires parsed_amount_fils [4755,5], a ledger group for both rows (base skips '0.005' as 0), balanced legs of 4755 and 5 (contra debit / merchant_payable credit), cached_payable_fils 4760, response and audit totalPostedFils 4760, GET /:id/rows parsedAmountFils [4755,5], and the Go settlement ledger-walk rebuild SQL (rebuild.go, verbatim) 4760. Base gives 475/0/null group/475, so it must fail on base and pass on the patch.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "r01_new_reject_contract_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts rejection of >3 decimals",
+        "apps/api/src/db/withTransaction.ts ROLLBACK and finally client.release()",
+        "apps/api/src/plugins/errorHandler.ts AppError -> 400"
+      ],
+      "id": "L4-R01",
+      "kind": "regression",
+      "rationale": "Inputs with more than three decimals ('4.7555', '4.7500', '120.0000', '-0.0001') move from accepted-and-truncated (base) to rejected (patch, ADR-0001 rule 3). Whatever a revision does, it must be one of two documented outcomes: 201, or exactly 400 {\"error\":\"invalid_amount\",\"message\":\"could not parse amount \\\"<amt>\\\"\"} with every sink empty; never a 500 or partial commit. Then 7 consecutive uploads of that class (more than the 5-client pool) must each answer within 5 s and a valid upload must still return 201 within 5 s (withTransaction released every client). Must pass on both revisions.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "r02_max_safe_roundtrip_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "packages/money/src/fils.ts parseBhdToFils MAX_SAFE_INTEGER guard",
+        "BIGINT columns ledger_entries.amount_fils, merchant_balances.cached_payable_fils, adjustment_import_rows.parsed_amount_fils",
+        "apps/api/src/admin/adjustmentImport.ts getAdjustmentImportRows numeric conversion"
+      ],
+      "id": "L4-R02",
+      "kind": "regression",
+      "rationale": "The x10 rescale moves the safe-integer boundary. Single row '9007199254740.991': if 201, the response total, parsed_amount_fils::text, both ledger legs' amount_fils::text, cached_payable_fils::text, the audit total and GET /:id/rows must all carry the same safe integer (no float rounding through pg BIGINT or JSON). Single row '9007199254740.992': either 201 with the same consistency or exactly 400 invalid_amount with nothing persisted, never a 500. Must pass on both revisions.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "r03_typecheck_module_graph.ts"
+      ],
+      "covers": [
+        "deleted apps/api/src/lib/decimal.ts",
+        "apps/api/tsconfig.json program",
+        "apps/api/src/app.ts buildApp module graph"
+      ],
+      "id": "L4-R03",
+      "kind": "regression",
+      "rationale": "The patch deletes apps/api/src/lib/decimal.ts and tsx does not type-check, so a passing test run cannot prove there is no dangling import. In each tree: `tsc --noEmit -p apps/api` must exit 0, the full app module graph (src/app.ts -> routes -> admin/adjustmentImport -> admin/adjustmentCsvParsing) must load, and no file under apps/api/src, packages, scripts or db may reference lib/decimal or parseDecimalMinor once lib/decimal.ts is gone. Must pass on both revisions.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "r04_edited_tests_scale_only.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentImport.test.ts (edited)",
+        "apps/api/src/routes/adminAdjustmentImport.test.ts (edited)"
+      ],
+      "id": "L4-R04",
+      "kind": "regression",
+      "rationale": "CLAUDE.md forbids editing existing tests and the patch edits adjustmentImport.test.ts and routes/adminAdjustmentImport.test.ts. The edits are acceptable only if every changed line differs from the base commit in integer literals alone, each changed literal is exactly 10x the old one, the line count is unchanged, and no skip/todo/only or weaker matcher appears. Vacuously true on base; must pass on both revisions.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "r05_base_tests_scale_only_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentImport.test.ts at dfc14fd",
+        "apps/api/src/routes/adminAdjustmentImport.test.ts at dfc14fd",
+        "apps/api/src/admin/adjustmentImport.ts and route behavior beyond the amount scale"
+      ],
+      "id": "L4-R05",
+      "kind": "regression",
+      "rationale": "Because the patch rewrote expected values, its edited tests are not independent evidence. This runs the BASE versions of both edited test files (git show HEAD:..., HEAD being the base commit in either checkout) with the project runner against this revision's code and a fresh DB. Every failing test must be one of the four whose literals the patch rescaled ('records the batch and its rows', 'reverses leg direction for a negative amount', 'updates the merchant balance cache', 'a valid CSV upload returns 201 and applies every row'), and every failing assertion must differ only by actual == 10 x expected. Any other failure means the test edits hid a different behavior change. Must pass on both revisions (nothing fails on base).",
+      "timeout_seconds": 900
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "r06_adr_valid_accepted.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentAmountFils accept side",
+        "packages/money/src/fils.ts BHD_STRING_PATTERN"
+      ],
+      "id": "L4-R06",
+      "kind": "regression",
+      "rationale": "The fix must not reject valid input. Over the same fixed-seed corpus as L4-V05 (mulberry32 seed 0x4C340001, 20000 cases) plus the fixed edges, every ADR-0001-valid amount (plain ASCII decimal after trim, at most three decimals, within the safe range) must be accepted, and every accepted value must be a safe integer. Guards the opposite failure from V05. Must pass on both revisions.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "s01_long_amount_cpu.ts"
+      ],
+      "covers": [
+        "packages/money/src/fils.ts parseBhdToFils BigInt(wholePart) * 1000n before the MAX_SAFE_INTEGER guard",
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentCsv (no cell-length cap) and parseAdjustmentAmountFils"
+      ],
+      "id": "L4-S01",
+      "kind": "security",
+      "rationale": "New-vulnerability candidate (availability). The patched parser calls BigInt(wholePart) on the whole digit run before its safe-range check, and the CSV path has no cell-length cap (Fastify default bodyLimit 1 MiB), so a finance/super_admin upload can carry a ~1,040,000-digit amount that is parsed synchronously on the event loop inside the open import transaction. Invariant: rejecting such a cell through the real parseAdjustmentCsv -> parseAdjustmentAmountFils path costs bounded CPU, median < 250 ms over 5 runs; Number() on the same string is printed as calibration. Base rejects it in ~15 ms via Number() -> Infinity -> toFils. Must pass on base; a patch failure is a newly introduced regression.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "s02_reject_fail_closed.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentAmountFils catch-all",
+        "packages/money/src/fils.ts parseBhdToFils trim + pattern + range guard"
+      ],
+      "id": "L4-S02",
+      "kind": "security",
+      "rationale": "The parser swap must not widen what is accepted or change how rejection fails. Over 40000 seeded inputs (grammar corpus seed 0x4C340002 plus a hostile alphabet seed 0x4C340003: signs, separators, exponent/hex markers, Unicode spaces, Arabic-Indic and fullwidth digits, BOM, NBSP, U+2212) and the fixed edges: every accepted input must be a plain ASCII decimal after trim and yield a safe integer, and every rejection must be BadRequestError/400/invalid_amount, never a raw RangeError mapped to 500. Must pass on both revisions.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "s03_sign_symmetry.ts"
+      ],
+      "covers": [
+        "packages/money/src/fils.ts parseBhdToFils isNegative = sign === '-' && magnitude !== 0n",
+        "apps/api/src/admin/ledgerAdjustments.ts amountFils > 0 vs negative branch"
+      ],
+      "id": "L4-S03",
+      "kind": "security",
+      "rationale": "Money direction depends on the parsed sign (postLedgerAdjustment credits merchant_payable for > 0; the cache adds the signed value). The patch replaced toFils(..., {allowNegative:true}) with sign-derived negativity, so a dropped sign would turn a debit into a credit. For 5009 seeded s matching \\d{1,12}(\\.\\d{1,3})? (valid on both revisions): parse(s) >= 0, parse('-'+s) <= 0 and parse(s) + parse('-'+s) === 0 (arithmetic, so base's -0 and the patch's +0 both pass). Must pass on both revisions.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "s04_rollback_paths_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentImport.ts applyAdjustmentImport mid-loop throw and addFils total",
+        "apps/api/src/db/withTransaction.ts ROLLBACK",
+        "apps/api/src/plugins/errorHandler.ts AppError and non-AppError branches",
+        "tables adjustment_imports, adjustment_import_rows, ledger_entries, merchant_balances, admin_audit_log"
+      ],
+      "id": "L4-S04",
+      "kind": "security",
+      "rationale": "Amounts are parsed inside the per-row loop after earlier rows already wrote adjustment_imports, ledger_entries, merchant_balances and adjustment_import_rows; ROLLBACK is the only cleanup. (A) AppError path: merchant A has a committed balance C0; uploads [A '5.00', B '2.00', A <bad>] with <bad> rejected on both revisions ('abc', '4.75abc', '90071992547409.92') must not be 2xx, must leave A's rows, legs and cache exactly as before, and leave nothing for B, the filename or the audit log. (B) non-AppError path: 11 rows of '9000000000000.000' overflow addFils's safe total after that row's writes (row 11 on base, row 2 on the patch); not 2xx, no internal detail ('toFils', 'safe integer', 'RangeError', the amount) in the body, and nothing persisted. Must pass on both revisions.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "s05_ledger_consistency_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/ledgerAdjustments.ts postLedgerAdjustment",
+        "apps/api/src/admin/adjustmentImport.ts merchant_balances upsert, row insert and audit metadata",
+        "apps/settlement/internal/ledger/rebuild.go ledger-walk formula"
+      ],
+      "id": "L4-S05",
+      "kind": "security",
+      "rationale": "The patch changes which rows count as zero ('0.005' and '-0.001' were 0 on base) and the scale of the rest. State invariants must hold at any scale. Merchant A rows '4.75','-1.25','0.00','0.005','-0.001','2' and merchant B row '3.333' in one upload: a row has a ledger group iff its parsed amount is non-zero; each group is exactly two balanced legs of |parsed| on that row's merchant with the sign-correct direction; no leg belongs to another merchant's rows; per merchant cache delta = sum of parsed = ledger-walk rebuild; response total = audit total = signed sum of parsed; adjustment_imports.row_count = 7. Must pass on both revisions.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "s06_authz_gate_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/routes/adminAdjustmentImport.ts preHandler requireAdminSession + requireAdminRole('finance','super_admin')",
+        "apps/api/src/adminAuth/middleware.ts requireAdminSession"
+      ],
+      "id": "L4-S06",
+      "kind": "security",
+      "rationale": "Who can post money through the import route must be unchanged. No session -> 401; a support admin -> 403; only merchant-side cookies (merchant session and impersonation cookie names with random values) -> 401; none of these writes any row. A super_admin -> 201. The route and middleware are not in the diff; this pins that the gate still fronts the patched parser. Must pass on both revisions.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "u01_adjustment_suite.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/*.test.ts for the adjustment import",
+        "apps/api/src/routes/adminAdjustmentImport.test.ts",
+        "packages/money/src/*.test.ts"
+      ],
+      "id": "L4-U01",
+      "kind": "suite",
+      "rationale": "Project suite for the changed component, run with the project's own runner exactly as npm test does (tsx --test --test-concurrency=1) against a fresh migrated Postgres: adjustmentCsvParsing.test.ts, adjustmentAmountFils.test.ts (added by the patch), adjustmentImport.test.ts and routes/adminAdjustmentImport.test.ts (edited by the patch; their edits are checked independently by L4-R04/L4-R05), plus the frozen packages/money suite. Passes iff every runner exits 0 with a complete summary and no failures.",
+      "timeout_seconds": 900
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "v01_over3dp_pure.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentAmountFils",
+        "packages/money/src/fils.ts BHD_STRING_PATTERN \\d{1,3} fraction limit",
+        "base parseDecimalMinor .slice(0, 2) truncation"
+      ],
+      "id": "L4-V01",
+      "kind": "variant",
+      "rationale": "Root-cause variant: digits beyond the third decimal. A BD text that is not a whole number of fils ('4.7555', '0.0001', '-0.0001', '1.23456789', '-2.0019') cannot be posted exactly and must be rejected; one whose extra digits are zeros ('4.7500', '120.0000') must be rejected or posted exactly. Base truncates all of them (475, 0, -0, 123, -200, 475, 12000). Asserts only exact-or-reject; the rejection contract is checked by L4-R01. Must fail on base and pass on the patch.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "v02_negative_subunit_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/ledgerAdjustments.ts negative branch and -0 zero-skip",
+        "apps/api/src/admin/adjustmentImport.ts cache delta with a negative amount",
+        "packages/money/src/fils.ts parseBhdToFils sign handling"
+      ],
+      "id": "L4-V02",
+      "kind": "variant",
+      "rationale": "Root-cause variant on the negative branch. Base turns '-0.005' into -0, which hits `amountFils === 0` in postLedgerAdjustment and silently drops a real debit, and posts '-1.001' as -100. ADR-0001 requires parsed [-5, -1001], a ledger group per row with merchant_payable debit / contra credit of |amount|, cache -1006 and ledger-walk rebuild -1006. Must fail on base and pass on the patch.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "v03_midbatch_reject_rollback_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentImport.ts mid-loop throw after earlier rows posted",
+        "apps/api/src/db/withTransaction.ts ROLLBACK",
+        "tables adjustment_imports, adjustment_import_rows, ledger_entries, merchant_balances, admin_audit_log"
+      ],
+      "id": "L4-V03",
+      "kind": "variant",
+      "rationale": "Error/teardown path of the newly rejected class. Rows [A '5.000', B '2.000', A '4.7555']: rows 1-2 have already written every sink inside the transaction when row 3 is parsed. 4.7555 BD is not a whole number of fils, so nothing may commit: the response is not 2xx and adjustment_imports (by filename), adjustment_import_rows, ledger_entries, merchant_balances (A and B) and the admin's adjustment_import_applied audit rows are all empty. Base truncates row 3 to 475 and commits the batch. Must fail on base and pass on the patch.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "v04_safe_bound_db.ts",
+        "--db"
+      ],
+      "covers": [
+        "packages/money/src/fils.ts parseBhdToFils safe-integer guard",
+        "apps/api/src/admin/adjustmentImport.ts addFils total overflow",
+        "apps/api/src/db/withTransaction.ts rollback on a non-AppError"
+      ],
+      "id": "L4-V04",
+      "kind": "variant",
+      "rationale": "Boundary variant moved by the x10 rescale. Per row, '9007199254740.991' BD (exactly MAX_SAFE_INTEGER fils), '9007199254740.992' and their negatives must parse exactly or be rejected; base posts them as +/-900719925474099. Across rows, two '9007199254740.991' rows for one merchant exceed the safe running total: the upload may succeed only if every persisted amount is exact, and if it fails nothing may persist. Must fail on base and pass on the patch.",
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "v05_property_pure.ts"
+      ],
+      "covers": [
+        "apps/api/src/admin/adjustmentCsvParsing.ts parseAdjustmentAmountFils",
+        "packages/money/src/fils.ts parseBhdToFils",
+        "ADR-0001 rules 1 and 3"
+      ],
+      "id": "L4-V05",
+      "kind": "variant",
+      "rationale": "Whole-domain variant instead of hand-picked values: a deterministic corpus (mulberry32 seed 0x4C340001, 20000 generated cases plus 42 fixed edges; grammar of padding, signs, 0-16 integer digits with leading zeros, 0-5 fraction digits, junk suffixes) is run through this revision's parseAdjustmentAmountFils and compared with an independent BigInt ADR-0001 oracle that never calls parseBhdToFils: every input must be rejected or parsed to exactly its fils value. Bucket quotas (0dp/1-2dp/3dp >= 1000 each, >3dp >= 1000, unsafe and junk >= 500) are enforced before the marker. Must fail on base and pass on the patch.",
+      "timeout_seconds": 300
+    },
+    {
+      "argv": [
+        "node",
+        "{plan_dir}/checks/ppv.mjs",
+        "--checkout",
+        "{checkout}",
+        "--scratch",
+        "{scratch}",
+        "--plan-dir",
+        "{plan_dir}",
+        "--script",
+        "v06_discount_sibling_pure.ts"
+      ],
+      "covers": [
+        "apps/api/src/payments/discountAdjustment.ts parsePromotionalDiscountFils"
+      ],
+      "id": "L4-V06",
+      "kind": "variant",
+      "rationale": "Same root cause in a sibling the patch did not touch: parsePromotionalDiscountFils (apps/api/src/payments/discountAdjustment.ts) converts BD text with parseFloat and Math.round(x * 100), the 2-decimal scale ADR-0001 forbids ('4.75'->475, '1.005'->100, '4.75abc' accepted). Invariant: BD text becomes exactly value x 1000 fils or is rejected. Fails on base; expected to fail on the patch too, recording an incomplete-fix residual. git grep of callers is printed as context: today the function has no call sites, so the residual is latent rather than reachable.",
+      "timeout_seconds": 300
+    }
+  ],
+  "evidence_level": "runtime",
   "expected_base_commit": "dfc14fd2b3d83b4f4b009eb5eba7a022fbf39bf5",
   "expected_patch_sha256": "1dd2052fb4e694beebd784126465d4e45b9479ee895c0b2bea3c85b6ba8ab731",
   "finding": {
