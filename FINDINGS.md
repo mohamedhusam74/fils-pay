@@ -189,3 +189,34 @@ on existing data. Fixes are grouped by shared root cause.
   did not touch the shared running stack.
 - **Not done (follow-up):** no container memory limit (`mem_limit`) or Node heap cap
   (`--max-old-space-size`) is set, so the 512 MB sizing in ARCHITECTURE isn't enforced locally.
+
+### Group: BD/fils scaling and rounding at system boundaries
+
+Shared root cause: amounts crossing a boundary (CSV import, scheme file, display) are converted
+with ad-hoc arithmetic instead of `@filspay/money`. Ground truth: 1 BD = 1000 fils, whole fils
+only, at most 3 decimals (ADR-0001).
+
+#### L4: adjustment CSV import posts every amount at 1/10
+
+- **Symptom:** finance imports `4.75` BD and 475 fils are posted to the ledger and the cached
+  payable, not 4,750. A third decimal is silently dropped (`4.755` → 475), and `0.005` posts as
+  0, so the row is skipped. The 2026-08-27 Slack thread shows it live: a 4,141.90 BD sheet posted
+  414,190 fils.
+- **How reproduced:** new test `apps/api/src/admin/adjustmentAmountFils.test.ts`. Before:
+  `"4.755"` → 475 (expected 4,755), and `"4.7555"` was accepted, not rejected.
+- **Root cause:** `parseAdjustmentAmountFils` used `toFils(parseDecimalMinor(raw))`, and
+  `apps/api/src/lib/decimal.ts` defaults to 2 decimals and truncates the rest. The importer
+  bypassed `parseBhdToFils`, which ADR-0001 mandates for text input.
+- **Fix:** `parseAdjustmentAmountFils` calls `parseBhdToFils` (BigInt-exact, ×1000, signed,
+  rejects more than 3 decimals). Deleted `lib/decimal.ts`, which had no other callers.
+- **How verified:** the new test fails before and passes after. Six existing assertions encoded
+  the bug and were corrected to ×1000 (`adjustmentImport.test.ts` 61, 67, 70, 125-126, 148;
+  `adminAdjustmentImport.test.ts` 108; e.g. "4.75" → 4,750, not 475). All 33 import tests pass.
+  api suite: 358/370, the same 12 pre-existing failures. Post-patch-validation launched; results
+  will be appended.
+- **Effect on existing data:** **every historical import is under-posted by 90%**, and rows
+  under 0.01 BD were dropped. The code fix does not touch existing rows.
+  `adjustment_import_rows.raw_amount_text` keeps the original text, so finance can recompute
+  each row with `parseBhdToFils`, then post the difference (correct − posted) as a correcting
+  adjustment with finance sign-off. The September duplicate import was already reversed by hand,
+  at the old 1/10 amounts.
